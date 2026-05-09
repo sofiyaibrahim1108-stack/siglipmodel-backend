@@ -17,7 +17,7 @@ router.post("/", upload.single("image"), async (req, res) => {
       createdAt: new Date(),
     });
 
-    // 📦 UPLOAD LOG
+    
     console.log(
       `📦 Stored: ${req.file.filename} (dim: ${embedding.length})`
     );
