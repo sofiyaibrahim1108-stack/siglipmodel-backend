@@ -9,8 +9,3 @@ export function cosineSimilarity(a, b) {
   for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
   return dot;
 }
-
-export function averageEmbeddings(a, b) {
-  const avg = a.map((v, i) => (v + b[i]) / 2);
-  return l2Normalize(avg);
-}

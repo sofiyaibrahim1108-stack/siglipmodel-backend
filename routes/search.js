@@ -1,10 +1,14 @@
 import express from "express";
 import { upload } from "../middleware/upload.js";
 import { getCollection } from "../config/db.js";
-import { getTextEmbedding, getImageEmbedding, TEXT_SIMILARITY_THRESHOLD, IMAGE_SIMILARITY_THRESHOLD } from "../models/siglip.js";
+import { getTextEmbedding, getImageEmbedding } from "../models/siglip.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 const router = express.Router();
+
+// Thresholds — text→image scores are naturally lower than image→image
+const TEXT_SIMILARITY_THRESHOLD  = 0.05; // 15% for text → image
+const IMAGE_SIMILARITY_THRESHOLD = 0.80; // 80% for image → image
 
 router.post("/", upload.single("image"), async (req, res) => {
   try {
@@ -21,17 +25,17 @@ router.post("/", upload.single("image"), async (req, res) => {
     let queryVector;
     let threshold;
 
-    // TEXT → IMAGE search (lower threshold — cross-modal scores are naturally lower)
+    // 📝 TEXT → IMAGE search
     if (hasText) {
       console.log(`📝 Text search: "${text}"`);
       queryVector = await getTextEmbedding(text.trim());
-      threshold = TEXT_SIMILARITY_THRESHOLD; // 20%
+      threshold   = TEXT_SIMILARITY_THRESHOLD;
 
-    // IMAGE → IMAGE search (higher threshold — same modality scores are high)
+    // 🖼️ IMAGE → IMAGE search
     } else {
       console.log("🖼️  Image search");
       queryVector = await getImageEmbedding(req.file.path);
-      threshold = IMAGE_SIMILARITY_THRESHOLD; // 80%
+      threshold   = IMAGE_SIMILARITY_THRESHOLD;
     }
 
     const all = await collection.find().toArray();
@@ -42,12 +46,13 @@ router.post("/", upload.single("image"), async (req, res) => {
       similarity: cosineSimilarity(queryVector, img.embedding),
     }));
 
-    // DEBUG: log all scores so we can see what threshold to set
+    // Debug log — shows actual scores so threshold can be tuned
     console.log("🔍 All similarity scores:");
-    scored
+    [...scored]
       .sort((a, b) => b.similarity - a.similarity)
       .forEach(r => console.log(`   ${(r.similarity * 100).toFixed(2)}% → ${r.imagePath}`));
 
+    // Filter, sort, return top 10
     const results = scored
       .filter(r => r.similarity >= threshold)
       .sort((a, b) => b.similarity - a.similarity)
@@ -56,7 +61,7 @@ router.post("/", upload.single("image"), async (req, res) => {
     if (results.length > 0) {
       console.log(`🎯 Found ${results.length} results above ${threshold * 100}%`);
     } else {
-      console.log(`⚠️  No results above ${threshold * 100}% — see scores above`);
+      console.log(`⚠️  No results above ${threshold * 100}%`);
     }
 
     res.json(results);
