@@ -1,55 +1,92 @@
 import express from "express";
 import { upload } from "../middleware/upload.js";
 import { getCollection } from "../config/db.js";
-import { getTextEmbedding, getImageEmbedding } from "../models/siglip.js";
+import {
+  getTextEmbedding,
+  getImageEmbedding
+} from "../models/siglip.js";
 
 const router = express.Router();
 
-const DEFAULT_CONFIDENCE_THRESHOLD = 0.0; // Fallback if frontend sends nothing (frontend always sends threshold)
+const DEFAULT_CONFIDENCE_THRESHOLD = 70.0;
 
-/**
- * Maps raw cosine similarity scores to human-readable confidence scores (0-100%)
- * using separate calibration parameters for text queries vs. image queries.
- */
+// ─────────────────────────────────────────────────────────────
+// CONFIDENCE CALCULATOR
+// ─────────────────────────────────────────────────────────────
+
 function calculateConfidence(similarity, isTextSearch) {
-  let scale, bias;
+
+  let scale;
+  let bias;
 
   if (isTextSearch) {
-    // 🔧 TEXT TUNING: Raw score 0.06 range-la vandhale 80%+ mela pokura madhiri scale panni iruken
+
     scale = 55.0;
-    bias  = 1.5;
+    bias = 1.5;
+
   } else {
-    // 🖼️ IMAGE TUNING: Image search calculation accurate-ah iruka intha scale
+
     scale = 12.0;
-    bias  = 8.0;
+    bias = 8.0;
   }
 
-  const logit = (similarity * scale) - bias;
-  const probability = 1 / (1 + Math.exp(-logit)); // Sigmoid function
+  const logit =
+    (similarity * scale) - bias;
 
-  return parseFloat((probability * 100).toFixed(1));
+  const probability =
+    1 / (1 + Math.exp(-logit));
+
+  return parseFloat(
+    (probability * 100).toFixed(1)
+  );
 }
 
-/**
- * Builds a MongoDB aggregation pipeline that computes dot product similarity
- * between stored embeddings and a given query vector.
- * Since embeddings are L2-normalized, dot product == cosine similarity.
- */
-function buildSimilarityPipeline(queryVector) {
+// ─────────────────────────────────────────────────────────────
+// FULL IMAGE PIPELINE
+// ─────────────────────────────────────────────────────────────
+
+function buildFullImagePipeline(queryVector) {
+
   return [
+
     {
       $addFields: {
+
         similarity: {
+
           $reduce: {
-            input: { $range: [0, { $size: "$embedding" }] },
+
+            input: {
+              $range: [
+                0,
+                { $size: "$siglip_embedding" }
+              ]
+            },
+
             initialValue: 0,
+
             in: {
+
               $add: [
+
                 "$$value",
+
                 {
                   $multiply: [
-                    { $arrayElemAt: ["$embedding", "$$this"] },
-                    { $arrayElemAt: [queryVector, "$$this"] }
+
+                    {
+                      $arrayElemAt: [
+                        "$siglip_embedding",
+                        "$$this"
+                      ]
+                    },
+
+                    {
+                      $arrayElemAt: [
+                        queryVector,
+                        "$$this"
+                      ]
+                    }
                   ]
                 }
               ]
@@ -58,127 +95,534 @@ function buildSimilarityPipeline(queryVector) {
         }
       }
     },
-    { $sort: { similarity: -1 } },
-    { $project: { imagePath: 1, similarity: 1, _id: 0 } }
+
+    {
+      $sort: {
+        similarity: -1
+      }
+    },
+
+    {
+      $project: {
+
+        imagePath: 1,
+        similarity: 1,
+        imageWidth: 1,
+        imageHeight: 1,
+
+        detections: {
+
+          $map: {
+
+            input: "$detections",
+
+            as: "d",
+
+            in: {
+
+              class: "$$d.class",
+
+              confidence: "$$d.confidence",
+
+              bbox: "$$d.bbox",
+
+              crop_image: "$$d.crop_image"
+            }
+          }
+        },
+
+        _id: 0
+      }
+    }
   ];
 }
 
-router.post("/", upload.single("image"), async (req, res) => {
-  try {
-    const { text } = req.body;
-    const collection = getCollection();
+// ─────────────────────────────────────────────────────────────
+// OBJECT SEARCH PIPELINE
+// ─────────────────────────────────────────────────────────────
 
-    const hasText  = text && text.trim().length > 0;
-    const hasImage = !!req.file;
+function buildObjectSearchPipeline(queryVector) {
 
-    if (!hasText && !hasImage) {
-      return res.status(400).json({ error: "Provide text or image to search" });
+  return [
+
+    { $unwind: "$detections" },
+
+    {
+      $match: {
+        "detections.confidence": {
+          $gte: 0.45
+        }
+      }
+    },
+
+    {
+      $addFields: {
+
+        similarity: {
+
+          $reduce: {
+
+            input: {
+              $range: [
+                0,
+                {
+                  $size:
+                    "$detections.siglip_embedding"
+                }
+              ]
+            },
+
+            initialValue: 0,
+
+            in: {
+
+              $add: [
+
+                "$$value",
+
+                {
+                  $multiply: [
+
+                    {
+                      $arrayElemAt: [
+                        "$detections.siglip_embedding",
+                        "$$this"
+                      ]
+                    },
+
+                    {
+                      $arrayElemAt: [
+                        queryVector,
+                        "$$this"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+
+    {
+      $sort: {
+        similarity: -1
+      }
+    },
+
+    {
+      $project: {
+
+        imagePath: 1,
+
+        similarity: 1,
+
+        imageWidth: 1,
+
+        imageHeight: 1,
+
+        cropImage: "$detections.crop_image",
+
+        detectionClass: "$detections.class",
+
+        detectionConf: "$detections.confidence",
+
+        bbox: "$detections.bbox",
+
+        _id: 0
+      }
     }
+  ];
+}
 
-    // ✅ Read threshold from frontend — fallback to default if missing or invalid
-    const rawThreshold = parseFloat(req.body.threshold);
-    const CONFIDENCE_THRESHOLD = (!isNaN(rawThreshold) && rawThreshold >= 0 && rawThreshold <= 100)
-      ? rawThreshold
-      : DEFAULT_CONFIDENCE_THRESHOLD;
+// ─────────────────────────────────────────────────────────────
+// MAIN SEARCH ROUTE
+// ─────────────────────────────────────────────────────────────
 
-    console.log(`🎯 Using confidence threshold: ${CONFIDENCE_THRESHOLD}%`);
+router.post(
+  "/",
+  upload.single("image"),
+  async (req, res) => {
 
-    let scored = [];
+    try {
 
-    // 🚀 CASE 1: MULTIMODAL "AND" OPTION (Both text and image provided)
-    if (hasText && hasImage) {
-      console.log(`🧠 AND Mode Active: Text ("${text.trim()}") + Image reference`);
+      const { text } = req.body;
 
-      const [textVector, imageVector] = await Promise.all([
-        getTextEmbedding(text.trim()),
-        getImageEmbedding(req.file.path)
-      ]);
+      const collection = getCollection();
 
-      // Fetch similarity for both vectors from DB
-      const [textResults, imageResults] = await Promise.all([
-        collection.aggregate(buildSimilarityPipeline(textVector)).toArray(),
-        collection.aggregate(buildSimilarityPipeline(imageVector)).toArray()
-      ]);
+      const hasText =
+        text &&
+        text.trim().length > 0;
 
-      // Map imageResults by imagePath for quick lookup
-      const imageSimMap = new Map(imageResults.map(r => [r.imagePath, r.similarity]));
+      const hasImage = !!req.file;
 
-      scored = textResults.map(r => {
-        const textSim  = Math.max(0, r.similarity);
-        const imageSim = Math.max(0, imageSimMap.get(r.imagePath) ?? 0);
+      if (!hasText && !hasImage) {
 
-        // Use an intersection blend (75% on the lower match + 25% on average match)
-        // to strictly filter out wrong assets during dual query matches.
-        const minSim = Math.min(textSim, imageSim);
-        const avgSim = (textSim + imageSim) / 2;
-        const combinedSim = (minSim * 0.75) + (avgSim * 0.25);
+        return res.status(400).json({
+          error:
+            "Provide text or image to search"
+        });
+      }
 
-        // Strict SigLIP Multi-modal logistic scaling
-        const scale = 36.0;
-        const bias  = 2.2;
+      const mode = hasImage
+        ? "full"
+        : (
+            req.body.mode === "object"
+              ? "object"
+              : "full"
+          );
 
-        const logit = (combinedSim * scale) - bias;
-        const probability = 1 / (1 + Math.exp(-logit));
-        const confidence = parseFloat((probability * 100).toFixed(1));
+      const rawThreshold =
+        parseFloat(req.body.threshold);
 
-        return {
-          imagePath:  r.imagePath,
-          similarity: combinedSim,
-          confidence: confidence
-        };
+      const CONFIDENCE_THRESHOLD =
+        (
+          !isNaN(rawThreshold) &&
+          rawThreshold >= 0 &&
+          rawThreshold <= 100
+        )
+          ? rawThreshold
+          : DEFAULT_CONFIDENCE_THRESHOLD;
+
+      console.log(
+        `🎯 Mode: ${mode} | Threshold: ${CONFIDENCE_THRESHOLD}%`
+      );
+
+      let scored = [];
+
+      // ─────────────────────────────────────────────────────
+      // IMAGE ONLY SEARCH
+      // ─────────────────────────────────────────────────────
+
+      if (hasImage && !hasText) {
+
+        console.log(
+          "🖼️ Image search → full image mode"
+        );
+
+        const queryVector =
+          await getImageEmbedding(
+            req.file.path
+          );
+
+        const raw =
+          await collection
+            .aggregate(
+              buildFullImagePipeline(queryVector)
+            )
+            .toArray();
+
+        scored = raw.map(r => ({
+
+          type: "full",
+
+          imagePath: r.imagePath,
+
+          imageWidth: r.imageWidth,
+
+          imageHeight: r.imageHeight,
+
+          detections: r.detections || [],
+
+          similarity: r.similarity,
+
+          confidence:
+            calculateConfidence(
+              r.similarity,
+              false
+            )
+        }));
+      }
+
+      // ─────────────────────────────────────────────────────
+      // TEXT + IMAGE SEARCH
+      // ─────────────────────────────────────────────────────
+
+      else if (hasText && hasImage) {
+
+        console.log(
+          `🧠 AND Mode: "${text.trim()}" + Image`
+        );
+
+        const [
+          textVector,
+          imageVector
+        ] = await Promise.all([
+
+          getTextEmbedding(text.trim()),
+
+          getImageEmbedding(req.file.path)
+        ]);
+
+        const [
+          textResults,
+          imageResults
+        ] = await Promise.all([
+
+          collection
+            .aggregate(
+              buildFullImagePipeline(textVector)
+            )
+            .toArray(),
+
+          collection
+            .aggregate(
+              buildFullImagePipeline(imageVector)
+            )
+            .toArray()
+        ]);
+
+        const imageSimMap = new Map(
+          imageResults.map(r => [
+            r.imagePath,
+            r.similarity
+          ])
+        );
+
+        scored = textResults.map(r => {
+
+          const textSim =
+            Math.max(0, r.similarity);
+
+          const imageSim =
+            Math.max(
+              0,
+              imageSimMap.get(r.imagePath) ?? 0
+            );
+
+          const minSim =
+            Math.min(textSim, imageSim);
+
+          const avgSim =
+            (textSim + imageSim) / 2;
+
+          const combinedSim =
+            (minSim * 0.75) +
+            (avgSim * 0.25);
+
+          const logit =
+            (combinedSim * 36.0) - 2.2;
+
+          const probability =
+            1 / (1 + Math.exp(-logit));
+
+          const confidence =
+            parseFloat(
+              (probability * 100).toFixed(1)
+            );
+
+          return {
+
+            type: "full",
+
+            imagePath: r.imagePath,
+
+            imageWidth: r.imageWidth,
+
+            imageHeight: r.imageHeight,
+
+            detections: r.detections || [],
+
+            similarity: combinedSim,
+
+            confidence
+          };
+        });
+      }
+
+      // ─────────────────────────────────────────────────────
+      // TEXT FULL SEARCH
+      // ─────────────────────────────────────────────────────
+
+      else if (
+        hasText &&
+        mode === "full"
+      ) {
+
+        console.log(
+          `📝 Text search (full): "${text}"`
+        );
+
+        const queryVector =
+          await getTextEmbedding(
+            text.trim()
+          );
+
+        const raw =
+          await collection
+            .aggregate(
+              buildFullImagePipeline(queryVector)
+            )
+            .toArray();
+
+        scored = raw.map(r => ({
+
+          type: "full",
+
+          imagePath: r.imagePath,
+
+          imageWidth: r.imageWidth,
+
+          imageHeight: r.imageHeight,
+
+          detections: r.detections || [],
+
+          similarity: r.similarity,
+
+          confidence:
+            calculateConfidence(
+              r.similarity,
+              true
+            )
+        }));
+      }
+
+      // ─────────────────────────────────────────────────────
+      // TEXT OBJECT SEARCH
+      // ─────────────────────────────────────────────────────
+
+      else if (
+        hasText &&
+        mode === "object"
+      ) {
+
+        console.log(
+          `🔍 Text search (object): "${text}"`
+        );
+
+        const queryVector =
+          await getTextEmbedding(
+            text.trim()
+          );
+
+        const raw =
+          await collection
+            .aggregate(
+              buildObjectSearchPipeline(queryVector)
+            )
+            .toArray();
+
+        scored = raw.map(r => {
+
+          const classBoost =
+            text
+              .toLowerCase()
+              .includes(
+                r.detectionClass.toLowerCase()
+              )
+                ? 0.25
+                : 0;
+
+          const finalSimilarity =
+            r.similarity + classBoost;
+
+          return {
+
+            type: "crop",
+
+            imagePath: r.imagePath,
+
+            imageWidth: r.imageWidth,
+
+            imageHeight: r.imageHeight,
+
+            cropImage: r.cropImage,
+
+            detectionClass:
+              r.detectionClass,
+
+            detectionConf:
+              r.detectionConf,
+
+            bbox: r.bbox,
+
+            similarity: finalSimilarity,
+
+            confidence:
+              calculateConfidence(
+                finalSimilarity,
+                true
+              )
+          };
+        });
+      }
+
+      // ─────────────────────────────────────────────────────
+      // DEBUG
+      // ─────────────────────────────────────────────────────
+
+      console.log("🔍 All results:");
+
+      [...scored]
+        .sort(
+          (a, b) =>
+            b.confidence - a.confidence
+        )
+        .forEach(r => {
+
+          if (r.type === "crop") {
+
+            console.log(
+              `   ${r.confidence}% [${r.detectionClass}] bbox=${JSON.stringify(r.bbox)} → ${r.cropImage}`
+            );
+
+          } else {
+
+            console.log(
+              `   ${r.confidence}% → ${r.imagePath} (${r.detections?.length || 0} boxes)`
+            );
+          }
+        });
+
+      // ─────────────────────────────────────────────────────
+      // FINAL FILTER
+      // ─────────────────────────────────────────────────────
+
+      const results =
+        scored
+          .filter(
+            r =>
+              r.confidence >=
+              CONFIDENCE_THRESHOLD
+          )
+          .sort(
+            (a, b) =>
+              b.confidence - a.confidence
+          )
+          .slice(0, 10);
+
+      console.log(
+
+        results.length > 0
+
+          ? `✅ Found ${results.length} results above ${CONFIDENCE_THRESHOLD}%`
+
+          : `⚠️ No results above ${CONFIDENCE_THRESHOLD}%`
+      );
+
+      return res.json({
+
+        mode,
+
+        total: results.length,
+
+        results
       });
 
-    // 📝 CASE 2: TEXT ONLY search
-    } else if (hasText) {
-      console.log(`📝 Text search: "${text}"`);
-      const queryVector = await getTextEmbedding(text.trim());
+    } catch (err) {
 
-      const raw = await collection.aggregate(buildSimilarityPipeline(queryVector)).toArray();
+      console.error(
+        "❌ Search error:",
+        err
+      );
 
-      scored = raw.map(r => ({
-        imagePath:  r.imagePath,
-        similarity: r.similarity,
-        confidence: calculateConfidence(r.similarity, true)
-      }));
+      return res.status(500).json({
 
-    // 🖼️ CASE 3: IMAGE ONLY search
-    } else {
-      console.log("🖼️  Image search");
-      const queryVector = await getImageEmbedding(req.file.path);
-
-      const raw = await collection.aggregate(buildSimilarityPipeline(queryVector)).toArray();
-
-      scored = raw.map(r => ({
-        imagePath:  r.imagePath,
-        similarity: r.similarity,
-        confidence: calculateConfidence(r.similarity, false)
-      }));
+        error: err.message
+      });
     }
-
-    // Debug log
-    console.log("🔍 All item confidence scores:");
-    [...scored]
-      .sort((a, b) => b.confidence - a.confidence)
-      .forEach(r => console.log(`   ${r.confidence}% (raw: ${r.similarity.toFixed(3)}) → ${r.imagePath}`));
-
-    // ✅ Filter by dynamic threshold from frontend, sort, return top 10
-    const results = scored
-      .filter(r => r.confidence >= CONFIDENCE_THRESHOLD)
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 10);
-
-    if (results.length > 0) {
-      console.log(`✅ Found ${results.length} results above ${CONFIDENCE_THRESHOLD}% confidence`);
-    } else {
-      console.log(`⚠️  No results above ${CONFIDENCE_THRESHOLD}% confidence`);
-    }
-
-    res.json(results);
-
-  } catch (err) {
-    console.error("❌ Search error:", err);
-    res.status(500).json({ error: err.message });
   }
-});
+);
 
 export default router;
