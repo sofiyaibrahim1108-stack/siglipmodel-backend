@@ -1,4 +1,3 @@
-// routes/upload.js
 
 import express from "express";
 import multer from "multer";
@@ -6,9 +5,9 @@ import fetch from "node-fetch";
 
 const router = express.Router();
 
-// ─────────────────────────────────────────────────────────────
+
 // MULTER MEMORY STORAGE
-// ─────────────────────────────────────────────────────────────
+
 
 const storage = multer.memoryStorage();
 
@@ -16,24 +15,20 @@ const upload = multer({
   storage: storage
 });
 
-// ─────────────────────────────────────────────────────────────
+
 // PYTHON SERVICE URL
-// ─────────────────────────────────────────────────────────────
 
 const PYTHON_SERVICE =
   process.env.MODEL_SERVICE_URL || "http://localhost:8000";
 
-// ─────────────────────────────────────────────────────────────
+
 // UPLOAD ROUTE
-// ─────────────────────────────────────────────────────────────
 
 router.post("/", upload.single("image"), async (req, res) => {
 
   try {
 
-    // ─────────────────────────────────────────────────────────
     // VALIDATE FILE
-    // ─────────────────────────────────────────────────────────
 
     if (!req.file) {
       return res.status(400).json({
@@ -45,16 +40,13 @@ router.post("/", upload.single("image"), async (req, res) => {
       `📤 Proxying direct binary buffer to Python: ${req.file.originalname}`
     );
 
-    // ─────────────────────────────────────────────────────────
     // ENCODE ORIGINAL FILENAME
-    // ─────────────────────────────────────────────────────────
 
     const encodedFilename =
       encodeURIComponent(req.file.originalname);
 
-    // ─────────────────────────────────────────────────────────
     // SEND RAW BUFFER TO PYTHON
-    // ─────────────────────────────────────────────────────────
+  
 
     const response = await fetch(
       `${PYTHON_SERVICE}/detect?filename=${encodedFilename}`,
@@ -69,9 +61,7 @@ router.post("/", upload.single("image"), async (req, res) => {
       }
     );
 
-    // ─────────────────────────────────────────────────────────
     // SAFE JSON PARSE
-    // ─────────────────────────────────────────────────────────
 
     let data;
 
@@ -86,9 +76,7 @@ router.post("/", upload.single("image"), async (req, res) => {
       });
     }
 
-    // ─────────────────────────────────────────────────────────
     // HANDLE PYTHON ERRORS
-    // ─────────────────────────────────────────────────────────
 
     if (!response.ok) {
 
@@ -99,9 +87,7 @@ router.post("/", upload.single("image"), async (req, res) => {
       });
     }
 
-    // ─────────────────────────────────────────────────────────
     // SUCCESS
-    // ─────────────────────────────────────────────────────────
 
     console.log(
       `✅ Detection complete — ${data.total_detections} objects stored directly by Python`

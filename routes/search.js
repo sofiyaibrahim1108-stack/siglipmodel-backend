@@ -10,9 +10,110 @@ const router = express.Router();
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 70.0;
 
-// ─────────────────────────────────────────────────────────────
+// VALIDATION CONFIG
+
+const MAX_TEXT_LENGTH = 100;
+const MAX_WORDS = 15;
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+
+// INPUT VALIDATION
+
+function validateSearchInput(req) {
+
+  const { text } = req.body;
+
+  // TEXT VALIDATION
+
+  if (text) {
+
+    const cleanText = text.trim();
+
+    if (cleanText.length < 2) {
+
+      return {
+        valid: false,
+        error: "Text too short"
+      };
+    }
+
+    if (cleanText.length > MAX_TEXT_LENGTH) {
+
+      return {
+        valid: false,
+        error: `Maximum ${MAX_TEXT_LENGTH} characters allowed`
+      };
+    }
+
+    const words =
+      cleanText.split(/\s+/);
+
+    if (words.length > MAX_WORDS) {
+
+      return {
+        valid: false,
+        error: `Maximum ${MAX_WORDS} words allowed`
+      };
+    }
+  }
+
+  // IMAGE VALIDATION
+
+  if (req.file) {
+
+    const allowedMimeTypes = [
+
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/webp"
+    ];
+
+    if (
+      !allowedMimeTypes.includes(
+        req.file.mimetype
+      )
+    ) {
+
+      return {
+        valid: false,
+        error:
+          "Only JPG, PNG, and WEBP images are allowed"
+      };
+    }
+
+    if (req.file.size > MAX_IMAGE_SIZE) {
+
+      return {
+        valid: false,
+        error:
+          "Image size must be less than 5MB"
+      };
+    }
+  }
+
+  // EMPTY CHECK
+
+  const hasText =
+    text &&
+    text.trim().length > 0;
+
+  const hasImage = !!req.file;
+
+  if (!hasText && !hasImage) {
+
+    return {
+      valid: false,
+      error:
+        "Provide text or image to search"
+    };
+  }
+
+  return {
+    valid: true
+  };
+}
+
 // CONFIDENCE CALCULATOR
-// ─────────────────────────────────────────────────────────────
 
 function calculateConfidence(similarity, isTextSearch) {
 
@@ -41,9 +142,7 @@ function calculateConfidence(similarity, isTextSearch) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
 // FULL IMAGE PIPELINE
-// ─────────────────────────────────────────────────────────────
 
 function buildFullImagePipeline(queryVector) {
 
@@ -137,9 +236,7 @@ function buildFullImagePipeline(queryVector) {
   ];
 }
 
-// ─────────────────────────────────────────────────────────────
 // OBJECT SEARCH PIPELINE
-// ─────────────────────────────────────────────────────────────
 
 function buildObjectSearchPipeline(queryVector) {
 
@@ -236,9 +333,7 @@ function buildObjectSearchPipeline(queryVector) {
   ];
 }
 
-// ─────────────────────────────────────────────────────────────
 // MAIN SEARCH ROUTE
-// ─────────────────────────────────────────────────────────────
 
 router.post(
   "/",
@@ -249,6 +344,19 @@ router.post(
 
       const { text } = req.body;
 
+      // VALIDATION
+
+      const validation =
+        validateSearchInput(req);
+
+      if (!validation.valid) {
+
+        return res.status(400).json({
+
+          error: validation.error
+        });
+      }
+
       const collection = getCollection();
 
       const hasText =
@@ -256,14 +364,6 @@ router.post(
         text.trim().length > 0;
 
       const hasImage = !!req.file;
-
-      if (!hasText && !hasImage) {
-
-        return res.status(400).json({
-          error:
-            "Provide text or image to search"
-        });
-      }
 
       const mode = hasImage
         ? "full"
@@ -291,9 +391,7 @@ router.post(
 
       let scored = [];
 
-      // ─────────────────────────────────────────────────────
       // IMAGE ONLY SEARCH
-      // ─────────────────────────────────────────────────────
 
       if (hasImage && !hasText) {
 
@@ -335,9 +433,7 @@ router.post(
         }));
       }
 
-      // ─────────────────────────────────────────────────────
       // TEXT + IMAGE SEARCH
-      // ─────────────────────────────────────────────────────
 
       else if (hasText && hasImage) {
 
@@ -431,9 +527,7 @@ router.post(
         });
       }
 
-      // ─────────────────────────────────────────────────────
       // TEXT FULL SEARCH
-      // ─────────────────────────────────────────────────────
 
       else if (
         hasText &&
@@ -478,9 +572,7 @@ router.post(
         }));
       }
 
-      // ─────────────────────────────────────────────────────
       // TEXT OBJECT SEARCH
-      // ─────────────────────────────────────────────────────
 
       else if (
         hasText &&
@@ -548,10 +640,7 @@ router.post(
         });
       }
 
-      // ─────────────────────────────────────────────────────
       // DEBUG
-      // ─────────────────────────────────────────────────────
-
       console.log("🔍 All results:");
 
       [...scored]
@@ -575,9 +664,7 @@ router.post(
           }
         });
 
-      // ─────────────────────────────────────────────────────
       // FINAL FILTER
-      // ─────────────────────────────────────────────────────
 
       const results =
         scored

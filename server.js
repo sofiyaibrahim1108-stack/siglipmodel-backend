@@ -15,34 +15,34 @@ import statsRoutes from "./routes/stats.js";
 
 const app = express();
 
-// ─── MIDDLEWARE ─────────────────────────────
+//  MIDDLEWARE
 app.use(cors());
 app.use(express.json());
 
-// ─── STATIC FOLDER ─────────────────────────
+//  STATIC FOLDER 
 if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads");
 }
 app.use("/uploads", express.static("uploads"));
 
-// ─── ROUTES ────────────────────────────────
+//  ROUTES 
 app.use("/upload", uploadRoutes);
 app.use("/search", searchRoutes);
 app.use("/stats", statsRoutes);
 
-// ─── HEALTH CHECK ─────────────────────────
+//  HEALTH CHECK 
 app.get("/", (req, res) => {
   res.send("🚀 SigLIP2 API is running");
 });
 
-// ─── START SERVER ─────────────────────────
+//  START SERVER
 async function start() {
   try {
     console.log("⏳ Starting server...");
 
-    // ✅ Order matters
-    await connectDB();     // MongoDB first
-    await loadModels();    // Then model load
+    
+    await connectDB();     
+    await loadModels();    
 
     const PORT = process.env.PORT || 5000;
 

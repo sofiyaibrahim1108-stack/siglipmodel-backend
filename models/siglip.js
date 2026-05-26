@@ -1,6 +1,5 @@
-// models/siglip.js
+
 // calls Python model service for embeddings
-// No model loaded here — Python handles all AI inference
 
 import fetch from "node-fetch";
 import fs from "fs";
